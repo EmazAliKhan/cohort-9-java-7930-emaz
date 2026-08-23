@@ -27,6 +27,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
 
 @Service
 @RequiredArgsConstructor
@@ -263,7 +266,7 @@ public class ContactService {
             value = "'" + value;
         }
 
-        if (value.contains(",") || value.contains("\"") || value.contains("\n")) {
+        if (value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r")) {
             return "\"" + value.replace("\"", "\"\"") + "\"";
         }
         return value;
@@ -278,8 +281,13 @@ public class ContactService {
         int failureCount = 0;
         List<String> errors = new ArrayList<>();
 
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {            String line = reader.readLine();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
+            String line = reader.readLine();
 
+            // Validate header
+            if (line == null || !line.trim().toLowerCase().contains("first name")) {
+                throw new IllegalArgumentException("CSV must have header: First Name, Last Name, Title, Email, Phone");
+            }
             int rowNumber = 1;
             while ((line = reader.readLine()) != null) {
                 rowNumber++;
@@ -316,7 +324,7 @@ public class ContactService {
                                 hasValidEmail = true;
                             } else {
                                 // Malformed entry - reject the whole row
-                                throw new IllegalArgumentException("Malformed email format: '" + trimmedPart + "'. Expected format: label:value");
+                                throw new IllegalArgumentException("Malformed email format. Expected: label:value");
                             }
                         }
                         if (!hasValidEmail) {
@@ -343,7 +351,7 @@ public class ContactService {
                                 hasValidPhone = true;
                             } else {
                                 // Malformed entry - reject the whole row
-                                throw new IllegalArgumentException("Malformed phone format: '" + trimmedPart + "'. Expected format: label:value");
+                                throw new IllegalArgumentException("Malformed phone format. Expected: label:value");
                             }
                         }
                         if (!hasValidPhone) {
@@ -374,10 +382,25 @@ public class ContactService {
         List<String> result = new ArrayList<>();
         StringBuilder current = new StringBuilder();
         boolean inQuotes = false;
+        boolean isEscaped = false;
 
-        for (char c : line.toCharArray()) {
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+
+            if (isEscaped) {
+                current.append(c);
+                isEscaped = false;
+                continue;
+            }
+
             if (c == '"') {
-                inQuotes = !inQuotes;
+                // Handle double quotes inside quoted field
+                if (inQuotes && i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                    current.append('"');
+                    i++; // Skip next quote
+                } else {
+                    inQuotes = !inQuotes;
+                }
             } else if (c == ',' && !inQuotes) {
                 result.add(current.toString().trim());
                 current = new StringBuilder();

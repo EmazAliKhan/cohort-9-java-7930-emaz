@@ -87,7 +87,7 @@ public class ContactController {
             String csv = contactService.exportContactsToCSV();
             byte[] csvBytes = csv.getBytes(StandardCharsets.UTF_8);
             HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.TEXT_PLAIN);
+            headers.setContentType(MediaType.valueOf("text/csv; charset=UTF-8"));
             headers.setContentDispositionFormData("attachment", "contacts.csv");
             headers.setContentLength(csvBytes.length);
 
@@ -103,12 +103,12 @@ public class ContactController {
         log.info("Received request to import contacts from file: {}", file.getOriginalFilename());
 
         if (file.isEmpty()) {
-            throw new RuntimeException("Please select a file to upload");
+            throw new IllegalArgumentException("Please select a file to upload");
         }
 
         String fileName = file.getOriginalFilename();
         if (fileName == null || !fileName.endsWith(".csv")) {
-            throw new RuntimeException("Please upload a CSV file");
+            throw new IllegalArgumentException("Please upload a CSV file");
         }
 
         ImportResult result = contactService.importContactsFromCSV(file);
