@@ -19,6 +19,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.nio.charset.StandardCharsets;
+
 @RestController
 @RequestMapping("/api/contacts")
 @RequiredArgsConstructor
@@ -83,8 +85,7 @@ public class ContactController {
 
         try {
             String csv = contactService.exportContactsToCSV();
-            byte[] csvBytes = csv.getBytes();
-
+            byte[] csvBytes = csv.getBytes(StandardCharsets.UTF_8);
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.TEXT_PLAIN);
             headers.setContentDispositionFormData("attachment", "contacts.csv");
