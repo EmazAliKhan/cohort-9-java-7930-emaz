@@ -2,6 +2,7 @@ package com.contactmanagement.service;
 
 import com.contactmanagement.dto.request.ContactRequest;
 import com.contactmanagement.dto.response.ContactResponse;
+import com.contactmanagement.dto.response.ImportResult;
 import com.contactmanagement.entity.Contact;
 import com.contactmanagement.entity.ContactEmail;
 import com.contactmanagement.entity.ContactPhone;
@@ -18,9 +19,17 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
 
 @Service
 @RequiredArgsConstructor
@@ -214,5 +223,243 @@ public class ContactService {
 
         contactRepository.delete(contact);
         log.info("Contact deleted successfully with id: {}", id);
+    }
+
+    @Transactional(readOnly = true)
+    public String exportContactsToCSV() {
+        log.info("Exporting contacts to CSV for current user");
+        User user = getCurrentUser();
+        List<Contact> contacts = contactRepository.findByUserId(user.getId());
+
+        StringBuilder csv = new StringBuilder();
+
+        // Header with all fields
+        csv.append("First Name,Last Name,Title,Email (Label:Value),Phone (Label:Value)\n");
+
+        for (Contact contact : contacts) {
+            // Format: label:value; label:value
+            String emails = contact.getEmails().stream()
+                    .map(e -> e.getLabel() + ":" + e.getValue())
+                    .collect(Collectors.joining("; "));
+
+            String phones = contact.getPhones().stream()
+                    .map(p -> p.getLabel() + ":" + p.getValue())
+                    .collect(Collectors.joining("; "));
+
+            csv.append(escapeCSV(contact.getFirstName())).append(",")
+                    .append(escapeCSV(contact.getLastName())).append(",")
+                    .append(escapeCSV(contact.getTitle() != null ? contact.getTitle() : "")).append(",")
+                    .append(escapeCSV(emails)).append(",")
+                    .append(escapeCSV(phones)).append("\n");
+        }
+
+        log.info("Exported {} contacts to CSV", contacts.size());
+        return csv.toString();
+    }
+
+    private String escapeCSV(String value) {
+        if (value == null) return "";
+
+        String trimmed = value.trim();
+        if (trimmed.startsWith("=") || trimmed.startsWith("+") ||
+                trimmed.startsWith("-") || trimmed.startsWith("@")) {
+            value = "'" + value;
+        }
+
+        if (value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r")) {
+            return "\"" + value.replace("\"", "\"\"") + "\"";
+        }
+        return value;
+    }
+
+    @Transactional
+    public ImportResult importContactsFromCSV(MultipartFile file) {
+        log.info("Importing contacts from CSV file: {}", file.getOriginalFilename());
+        User user = getCurrentUser();
+
+        int successCount = 0;
+        int failureCount = 0;
+        List<String> errors = new ArrayList<>();
+
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
+            String line = reader.readLine();
+
+            // Validate header - throws IllegalArgumentException for HTTP 400
+            if (line == null || !line.trim().toLowerCase().contains("first name")) {
+                throw new IllegalArgumentException("CSV must have header: First Name, Last Name, Title, Email, Phone");
+            }
+
+            int rowNumber = 1;
+            while ((line = reader.readLine()) != null) {
+                rowNumber++;
+                try {
+                    String[] fields = parseCSVLine(line);
+                    if (fields.length < 5) {
+                        errors.add("Row " + rowNumber + ": Invalid format (expected 5 columns)");
+                        failureCount++;
+                        continue;
+                    }
+
+                    // Validate and sanitize fields
+                    String firstName = fields[0].trim();
+                    String lastName = fields[1].trim();
+                    String title = fields[2].trim();
+                    String emailField = fields[3].trim();
+                    String phoneField = fields[4].trim();
+
+                    // Validate required fields
+                    if (firstName.isEmpty() || lastName.isEmpty()) {
+                        errors.add("Row " + rowNumber + ": First Name and Last Name are required");
+                        failureCount++;
+                        continue;
+                    }
+
+                    // Validate length constraints
+                    if (firstName.length() > 50) {
+                        errors.add("Row " + rowNumber + ": First Name must be at most 50 characters");
+                        failureCount++;
+                        continue;
+                    }
+                    if (lastName.length() > 50) {
+                        errors.add("Row " + rowNumber + ": Last Name must be at most 50 characters");
+                        failureCount++;
+                        continue;
+                    }
+                    if (title.length() > 100) {
+                        errors.add("Row " + rowNumber + ": Title must be at most 100 characters");
+                        failureCount++;
+                        continue;
+                    }
+
+                    Contact contact = new Contact();
+                    contact.setFirstName(firstName);
+                    contact.setLastName(lastName);
+                    contact.setTitle(title);
+                    contact.setUser(user);
+
+                    // Parse emails: label:value; label:value
+                    if (!emailField.isEmpty()) {
+                        String[] emailParts = emailField.split(";");
+                        boolean hasValidEmail = false;
+                        for (String part : emailParts) {
+                            String trimmedPart = part.trim();
+                            if (trimmedPart.isEmpty()) {
+                                continue;
+                            }
+                            String[] kv = trimmedPart.split(":", 2);
+                            if (kv.length == 2 && !kv[0].trim().isEmpty() && !kv[1].trim().isEmpty()) {
+                                // Validate email format
+                                String emailValue = kv[1].trim();
+                                if (!emailValue.matches("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+$")) {
+                                    errors.add("Row " + rowNumber + ": Invalid email format: '" + emailValue + "'");
+                                    failureCount++;
+                                    continue;
+                                }
+                                ContactEmail email = new ContactEmail();
+                                email.setLabel(kv[0].trim());
+                                email.setValue(emailValue);
+                                email.setContact(contact);
+                                contact.getEmails().add(email);
+                                hasValidEmail = true;
+                            } else {
+                                errors.add("Row " + rowNumber + ": Malformed email format. Expected: label:value");
+                                failureCount++;
+                                continue;
+                            }
+                        }
+                        if (!hasValidEmail && !emailField.isEmpty()) {
+                            errors.add("Row " + rowNumber + ": No valid email entries found");
+                            failureCount++;
+                            continue;
+                        }
+                    }
+
+                    // Parse phones: label:value; label:value
+                    if (!phoneField.isEmpty()) {
+                        String[] phoneParts = phoneField.split(";");
+                        boolean hasValidPhone = false;
+                        for (String part : phoneParts) {
+                            String trimmedPart = part.trim();
+                            if (trimmedPart.isEmpty()) {
+                                continue;
+                            }
+                            String[] kv = trimmedPart.split(":", 2);
+                            if (kv.length == 2 && !kv[0].trim().isEmpty() && !kv[1].trim().isEmpty()) {
+                                ContactPhone phone = new ContactPhone();
+                                phone.setLabel(kv[0].trim());
+                                phone.setValue(kv[1].trim());
+                                phone.setContact(contact);
+                                contact.getPhones().add(phone);
+                                hasValidPhone = true;
+                            } else {
+                                errors.add("Row " + rowNumber + ": Malformed phone format. Expected: label:value");
+                                failureCount++;
+                                continue;
+                            }
+                        }
+                        if (!hasValidPhone && !phoneField.isEmpty()) {
+                            errors.add("Row " + rowNumber + ": No valid phone entries found");
+                            failureCount++;
+                            continue;
+                        }
+                    }
+
+                    contactRepository.save(contact);
+                    successCount++;
+
+                } catch (IllegalArgumentException e) {
+                    // Re-throw validation errors to map to HTTP 400
+                    throw e;
+                } catch (Exception e) {
+                    log.error("Failed to import row {}: {}", rowNumber, e.getMessage());
+                    errors.add("Row " + rowNumber + ": " + e.getMessage());
+                    failureCount++;
+                }
+            }
+
+        } catch (IllegalArgumentException e) {
+            // Re-throw validation errors (HTTP 400)
+            throw e;
+        } catch (Exception e) {
+            log.error("Failed to import contacts", e);
+            throw new RuntimeException("Failed to import contacts: " + e.getMessage(), e);
+        }
+
+        log.info("Imported {} contacts successfully, {} failed", successCount, failureCount);
+        return new ImportResult(successCount, failureCount, errors);
+    }
+
+    private String[] parseCSVLine(String line) {
+        List<String> result = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        boolean isEscaped = false;
+
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+
+            if (isEscaped) {
+                current.append(c);
+                isEscaped = false;
+                continue;
+            }
+
+            if (c == '"') {
+                // Handle double quotes inside quoted field
+                if (inQuotes && i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                    current.append('"');
+                    i++; // Skip next quote
+                } else {
+                    inQuotes = !inQuotes;
+                }
+            } else if (c == ',' && !inQuotes) {
+                result.add(current.toString().trim());
+                current = new StringBuilder();
+            } else {
+                current.append(c);
+            }
+        }
+        result.add(current.toString().trim());
+        return result.toArray(new String[0]);
     }
 }
